@@ -60,11 +60,12 @@ def create_nowpayments_invoice(amount_usd, chat_id, option):
         "ipn_callback_url": f"{WEBHOOK_HOST}/nowpayments"
     }
     response = requests.post(url, json=data, headers=headers)
-    if response.status_code == 201:
+    if response.status_code in [200, 201]:
         return response.json()
     else:
-        print(f"Error creating invoice: {response.text}")
+        print(f"Error creating invoice: {response.status_code} {response.text}")
         return None
+
 
 
 @app.route(f"/webhook", methods=["POST"])
