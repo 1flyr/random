@@ -1,150 +1,180 @@
-from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from flask import Flask, request, jsonify
 import requests
 import os
 
-# ✅ Replace this with your new, secure Telegram Bot Token
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # Set in environment or replace with string
-NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")  # Also store securely
-BTC_RECEIVE_ADDRESS = "bc1qqca63az6zht7ttp09089wj0h8k6um7a65a9sh6"
-WEBHOOK_HOST = "https://yourdomain.com"  # <- Replace with your actual public URL
+app = Flask(__name__)
 
-# Prank Plan Prices
-PRICING = {
-    "1": {"price": 5, "minutes": 20},
-    "2": {"price": 15, "minutes": 60},
-    "3": {"price": 30, "minutes": 120},
-    "4": {"price": 50, "minutes": 360},
-    "5": {"price": 100, "minutes": 1440},
-    "6": {"price": 300, "lifetime": True}
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
+
+BASE_TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+PRICES = {
+    "1": {"amount_usd": 5, "desc": "20 minutes of spam calls and texts", "duration": 20},
+    "2": {"amount_usd": 15, "desc": "1 hour of spam calls and texts", "duration": 60},
+    "3": {"amount_usd": 30, "desc": "2 hours of spam calls and texts", "duration": 120},
+    "4": {"amount_usd": 50, "desc": "6 hours of spam calls and texts", "duration": 360},
+    "5": {"amount_usd": 100, "desc": "1 whole day of spam calls and texts", "duration": 1440},
+    "6": {"amount_usd": 300, "desc": "Full lifetime access", "duration": None},  # lifetime
 }
 
-user_state = {}  # Temporary in-memory storage
+# Store user states in memory for demo (not persistent!)
+user_states = {}
+# user_states structure example:
+# {
+#   chat_id: {
+#       'step': 'awaiting_option' / 'awaiting_payment' / 'awaiting_phone',
+#       'invoice_id': '...', 
+#       'duration': 60,
+#       'lifetime_id': '18KBrM0PE7hLjZ' (if lifetime),
+#       'phone': '...'
+#   }
+# }
 
-# Set up Flask
-app = Flask(__name__)
-application = Application.builder().token(TOKEN).build()
+LIFETIME_ID = "18KBrM0PE7hLjZ"
 
-# /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("1: $5 (20 mins)", callback_data="1")],
-        [InlineKeyboardButton("2: $15 (1 hour)", callback_data="2")],
-        [InlineKeyboardButton("3: $30 (2 hours)", callback_data="3")],
-        [InlineKeyboardButton("4: $50 (6 hours)", callback_data="4")],
-        [InlineKeyboardButton("5: $100 (1 day)", callback_data="5")],
-        [InlineKeyboardButton("6: $300 (Lifetime)", callback_data="6")],
-    ]
-    markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("💣 *SMSBomb by SKYY*\nChoose a plan:", parse_mode="Markdown", reply_markup=markup)
 
-# Plan selection
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    choice = query.data
-    plan = PRICING.get(choice)
-
-    if not plan:
-        await query.edit_message_text("Invalid option.")
-        return
-
-    amount = plan["price"]
-    order_id = f"user_{user_id}_plan_{choice}"
-
+def send_message(chat_id, text):
+    url = f"{BASE_TELEGRAM_URL}/sendMessage"
     payload = {
-        "price_amount": amount,
-        "price_currency": "usd",
-        "pay_currency": "btc",
-        "order_id": order_id,
-        "ipn_callback_url": f"{WEBHOOK_HOST}/nowpayments",
-        "payout_address": BTC_RECEIVE_ADDRESS,
-        "payout_currency": "btc"
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
     }
+    requests.post(url, json=payload)
 
+
+def create_nowpayments_invoice(amount_usd, chat_id, option):
+    url = "https://api.nowpayments.io/v1/invoice"
     headers = {
         "x-api-key": NOWPAYMENTS_API_KEY,
         "Content-Type": "application/json"
     }
-
-    response = requests.post("https://api.nowpayments.io/v1/invoice", json=payload, headers=headers)
-    data = response.json()
-
-    if "invoice_url" not in data:
-        await query.edit_message_text("❌ Error creating invoice.")
-        return
-
-    user_state[user_id] = {
-        "paid": False,
-        "plan": choice,
-        "invoice_id": data["invoice_id"],
-        "order_id": order_id
+    data = {
+        "price_amount": amount_usd,
+        "price_currency": "usd",
+        "pay_currency": "btc",
+        "order_id": f"smsbomb-{chat_id}-{option}",
+        "order_description": f"SMSBomb by SKYY - Option {option}",
+        "ipn_callback_url": f"{WEBHOOK_HOST}/nowpayments",
+        "buyer_email": None
     }
-
-    await query.edit_message_text(
-        f"🔗 [Click here to pay ${amount} in BTC]({data['invoice_url']})\n\nAfter paying, come back and send the target phone number.",
-        parse_mode="Markdown",
-        disable_web_page_preview=False
-    )
-
-# Handle messages (Lifetime ID or phone #)
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-
-    if text == "18KBrM0PE7hLjZ":
-        user_state[user_id] = {"paid": True, "lifetime": True}
-        await update.message.reply_text("✅ Lifetime ID verified. Send a phone number.")
-        return
-
-    if user_state.get(user_id, {}).get("paid"):
-        plan = user_state[user_id]
-        minutes = PRICING.get(plan.get("plan"), {}).get("minutes", "∞")
-        if plan.get("lifetime"):
-            minutes = "∞"
-        await update.message.reply_text(f"✅ SMS Bombing started on {text} 📱\n⏳ Job ending in {minutes} minutes")
+    response = requests.post(url, json=data, headers=headers)
+    if response.status_code == 201:
+        return response.json()
     else:
-        await update.message.reply_text("❗ You must pay first. Use /start to pick a plan.")
+        print(f"Error creating invoice: {response.text}")
+        return None
 
-# Webhook from NOWPayments
-@app.route("/nowpayments", methods=["POST"])
-def nowpayments_webhook():
-    data = request.json
-    order_id = data.get("order_id")
-    payment_status = data.get("payment_status")
 
-    if payment_status == "finished" and order_id:
-        try:
-            user_id = int(order_id.split("_")[1])
-            if user_id in user_state:
-                user_state[user_id]["paid"] = True
-                application.bot.send_message(
-                    chat_id=user_id,
-                    text="✅ Payment confirmed! Send the phone number to prank."
-                )
-        except Exception as e:
-            print(f"Webhook error: {e}")
-    return "OK"
-
-# Telegram webhook handler
-@app.route("/webhook", methods=["POST"])
+@app.route(f"/webhook", methods=["POST"])
 def telegram_webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "ok"
+    data = request.get_json()
 
-# Register handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(button_handler))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    if not data or 'message' not in data:
+        return jsonify({"status": "ignored"})
 
-# Run app
+    message = data["message"]
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip()
+
+    # Handle /start
+    if text == "/start":
+        user_states[chat_id] = {'step': 'awaiting_option'}
+        msg = "*Welcome to SMSBomb by SKYY*\nChoose an option by sending the number:\n"
+        for k, v in PRICES.items():
+            price = v["amount_usd"]
+            desc = v["desc"]
+            msg += f"{k}: ${price} BTC ({desc})\n"
+        msg += "\nOr send your *lifetime ID* if you have one."
+        send_message(chat_id, msg)
+        return jsonify({"status": "ok"})
+
+    # Check if user sent lifetime ID
+    if text == LIFETIME_ID:
+        user_states[chat_id] = {'step': 'awaiting_phone', 'duration': None, 'lifetime_id': LIFETIME_ID}
+        send_message(chat_id, f"✅ Lifetime access recognized! Send the phone number to start bombing.")
+        return jsonify({"status": "ok"})
+
+    state = user_states.get(chat_id)
+
+    if not state:
+        send_message(chat_id, "Please start with /start")
+        return jsonify({"status": "ok"})
+
+    # Waiting for option (1-6)
+    if state['step'] == 'awaiting_option':
+        if text not in PRICES:
+            send_message(chat_id, "Invalid option. Please send a number between 1 and 6.")
+            return jsonify({"status": "ok"})
+        option = text
+        price_data = PRICES[option]
+        invoice = create_nowpayments_invoice(price_data["amount_usd"], chat_id, option)
+        if not invoice:
+            send_message(chat_id, "Failed to create payment invoice. Please try again later.")
+            return jsonify({"status": "ok"})
+        # Save invoice info
+        user_states[chat_id].update({
+            'step': 'awaiting_payment',
+            'invoice_id': invoice['id'],
+            'duration': price_data["duration"],
+            'option': option
+        })
+        pay_url = invoice["invoice_url"]
+        send_message(chat_id,
+                     f"Please pay *${price_data['amount_usd']} BTC* using the link below:\n{pay_url}\n\n"
+                     f"After payment is confirmed, you will be prompted for the phone number.")
+        return jsonify({"status": "ok"})
+
+    # Waiting for phone number after payment confirmation
+    if state['step'] == 'awaiting_phone':
+        phone = text
+        # Basic phone validation (simple)
+        if len(phone) < 6 or not any(c.isdigit() for c in phone):
+            send_message(chat_id, "Please send a valid phone number.")
+            return jsonify({"status": "ok"})
+
+        user_states[chat_id].update({
+            'step': 'done',
+            'phone': phone
+        })
+        dur_text = "lifetime" if state.get('lifetime_id') else f"{state.get('duration')} minutes"
+        send_message(chat_id,
+                     f"✅ SMS Bombing started on {phone} | Job ending in {dur_text}.\n\n")
+        return jsonify({"status": "ok"})
+
+    # If user is waiting for payment confirmation, ignore phone numbers etc.
+    if state['step'] == 'awaiting_payment':
+        send_message(chat_id, "Waiting for payment confirmation. Please pay using the invoice link.")
+        return jsonify({"status": "ok"})
+
+    return jsonify({"status": "ok"})
+
+
+@app.route("/nowpayments", methods=["POST"])
+def nowpayments_ipn():
+    data = request.get_json()
+    payment_status = data.get("payment_status")
+    invoice_id = data.get("invoice_id")
+    order_id = data.get("order_id")
+
+    # Example order_id format: smsbomb-<chat_id>-<option>
+    if not order_id or not order_id.startswith("smsbomb-"):
+        return jsonify({"status": "ignored"})
+
+    chat_id = int(order_id.split("-")[1])
+
+    # Confirm payment is completed
+    if payment_status == "finished":
+        user_state = user_states.get(chat_id)
+        if user_state and user_state.get('invoice_id') == invoice_id:
+            # Mark payment confirmed, prompt for phone number
+            user_states[chat_id]['step'] = 'awaiting_phone'
+            send_message(chat_id, "✅ Payment received! Now, please send the phone number to start the prank.")
+    return jsonify({"status": "ok"})
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        webhook_url=f"{WEBHOOK_HOST}/webhook"
-    )
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
