@@ -57,8 +57,7 @@ def create_nowpayments_invoice(amount_usd, chat_id, option):
         "pay_currency": "btc",
         "order_id": f"smsbomb-{chat_id}-{option}",
         "order_description": f"SMSBomb by SKYY - Option {option}",
-        "ipn_callback_url": f"{WEBHOOK_HOST}/nowpayments",
-        "buyer_email": None
+        "ipn_callback_url": f"{WEBHOOK_HOST}/nowpayments"
     }
     response = requests.post(url, json=data, headers=headers)
     if response.status_code == 201:
